@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+.secrets/
+**/.secrets/
+**/.env
+**/.env.*
+.vercel/
+node_modules/
+*.log
+*.zip
+.DS_Store
+Thumbs.db

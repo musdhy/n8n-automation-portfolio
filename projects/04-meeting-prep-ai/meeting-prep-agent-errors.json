@@ -1,0 +1,141 @@
+{
+  "name": "Meeting Prep AI Agent - Errors",
+  "nodes": [
+    {
+      "id": "catch-prep-error",
+      "name": "Catch prep error",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {},
+      "notes": "Native Error Trigger for automatic production failures. Choose this workflow in main Settings → Error workflow. It does not need n8n public API access and does not receive original failed input.",
+      "notesInFlow": false
+    },
+    {
+      "id": "prepare-safe-error",
+      "name": "Prepare safe error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "\n\nconst event=$input.first().json,execution=event.execution||{};\nconst err=execution.error||event.trigger?.error||{};\nconst name=String(execution.lastNodeExecuted||err.node?.name||'Trigger or unknown node').slice(0,100);\nconst ai=name==='Stop failed agent briefing';\nconst knownTypes=['NodeApiError','NodeOperationError','Error','WorkflowActivationError','ExpressionError'];\nconst type=knownTypes.includes(err.name)?err.name:'ExecutionError';\nconst status=/^[1-5][0-9]{2}$/.test(String(err.httpCode||err.statusCode||''))?String(err.httpCode||err.statusCode):null;\nreturn [{json:{\n workflow_name:'Meeting Prep AI Agent',\n failed_node:ai?'Write prep briefing / Validate saved briefing':name,\n error_message:ai?'AI briefing failed after extraction/validation; requester notification attempted.':type+(status?' (HTTP '+status+')':'')+'. Inspect the failed node configuration; original message and content intentionally omitted.',\n failed_input:{available:false,reason:'Intentionally omitted: no transcript, briefing, response_url, request headers or customer data is logged.'},\n execution_id:execution.id?String(execution.id):null\n}}];"
+      },
+      "notes": "Create exactly the existing postcall_errors columns from safe metadata only. Never copy error stack, original message, input, transcript, briefing or response_url. Original errors may contain customer/provider content, so store type/status and a safe explanation instead. No API credential.",
+      "notesInFlow": false
+    },
+    {
+      "id": "log-prep-error",
+      "name": "Log prep error",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "authentication": "secretKey",
+        "resource": "row",
+        "operation": "create",
+        "tableId": "postcall_errors",
+        "dataToSend": "autoMapInputData",
+        "inputsToIgnore": ""
+      },
+      "notes": "Insert sanitized metadata into EXISTING postcall_errors. Credential: Meeting Prep Supabase. Input: exact row from Prepare safe error; output: inserted row or error. Logging failure still attempts admin Slack.",
+      "notesInFlow": false,
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Meeting Prep Supabase"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "alert-prep-admin",
+      "name": "Alert prep admin",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        720,
+        0
+      ],
+      "parameters": {
+        "authentication": "accessToken",
+        "resource": "message",
+        "operation": "post",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "<YOUR_SLACK_CHANNEL_ID>"
+        },
+        "messageType": "text",
+        "text": "={{ 'Meeting prep failed.\\nNode: '+$('Prepare safe error').first().json.failed_node+'\\nReason: '+$('Prepare safe error').first().json.error_message+'\\nError row saved: '+Boolean($('Log prep error').first().json.id) }}",
+        "otherOptions": {
+          "includeLinkToWorkflow": false,
+          "mrkdwn": false
+        }
+      },
+      "notes": "Post only safe metadata to an internal admin channel. Credential: Meeting Prep Slack. Replace <YOUR_SLACK_CHANNEL_ID> and invite the bot. Native Slack node rejects API errors. No retry or recursive error handler.",
+      "notesInFlow": false,
+      "credentials": {
+        "slackApi": {
+          "id": "",
+          "name": "Meeting Prep Slack"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Catch prep error": {
+      "main": [
+        [
+          {
+            "node": "Prepare safe error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare safe error": {
+      "main": [
+        [
+          {
+            "node": "Log prep error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log prep error": {
+      "main": [
+        [
+          {
+            "node": "Alert prep admin",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Africa/Lagos",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "none",
+    "saveManualExecutions": false,
+    "saveExecutionProgress": false
+  }
+}

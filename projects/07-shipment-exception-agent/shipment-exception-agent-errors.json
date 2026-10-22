@@ -1,0 +1,170 @@
+{
+  "name": "Shipment Exception Agent - Errors",
+  "nodes": [
+    {
+      "id": "catch-ap-error",
+      "name": "Catch Logistics error",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {},
+      "notes": "Native Error Trigger for unexpected production workflow failures. Set this under the main workflow Error workflow setting; no n8n API key is needed.",
+      "notesInFlow": false,
+      "retryOnFail": false
+    },
+    {
+      "id": "prepare-safe-error",
+      "name": "Prepare safe error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const event=$input.first().json,ex=event.execution||{},err=ex.error||event.trigger?.error||{};\nconst known=['01 Carrier tracking webhook','02 Validate tracking event','03 Acknowledge tracking receipt','04 Valid tracking event','05 Find bound shipment','06 Detect exception and severity','07 Record tracking event once','08 Exception detected','09 Open exception once','10 Investigate shipment','11 Logistics model','12 Investigation schema','get_shipment_history','get_order_and_promise','get_carrier_recent_performance','16 Guard investigation','17 Save analysis and reserve report','18 Report shipment exception','19 Mark confirmed report','20 Log rejected event'];\nconst rawNode=ex.lastNodeExecuted||err.node?.name||'',failed_node=known.includes(rawNode)?rawNode:'Unknown node';\nconst codes=['LS_UNKNOWN_OR_AMBIGUOUS_SHIPMENT','LS_SHIPMENT_REFERENCE_INVALID','LS_EXCEPTION_OWNERSHIP_INVALID','LS_REPORT_TOO_LONG','LS_SEND_RESERVATION_INVALID','LS_SLACK_POST_NOT_CONFIRMED'];\nconst code=codes.find(c=>String(err.message||'').includes(c));\nreturn [{json:{workflow_name:'Shipment Exception Agent',failed_node,error_message:code||(failed_node==='18 Report shipment exception'?'Slack delivery failed or is uncertain; exception remains open. Do not resend without checking the channel.':'Processing failed. Inspect the execution; raw error omitted.'),execution_id:ex.id?String(ex.id).slice(0,100):null,failed_input:{available:false,reason:'Raw tracking notes, headers and provider error text omitted'}}}];"
+      },
+      "notes": "Log workflow/node/type only, never chat content, customer identity, original provider errors, credentials or stacks.",
+      "notesInFlow": false,
+      "retryOnFail": false
+    },
+    {
+      "id": "log-ap-error",
+      "name": "Log Logistics error",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        520,
+        0
+      ],
+      "parameters": {
+        "authentication": "secretKey",
+        "resource": "row",
+        "operation": "create",
+        "tableId": "postcall_errors",
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "workflow_name",
+              "fieldValue": "={{ $json.workflow_name }}"
+            },
+            {
+              "fieldId": "failed_node",
+              "fieldValue": "={{ $json.failed_node }}"
+            },
+            {
+              "fieldId": "error_message",
+              "fieldValue": "={{ $json.error_message }}"
+            },
+            {
+              "fieldId": "execution_id",
+              "fieldValue": "={{ $json.execution_id }}"
+            },
+            {
+              "fieldId": "failed_input",
+              "fieldValue": "={{ $json.failed_input }}"
+            }
+          ]
+        }
+      },
+      "notes": "Insert safe metadata in existing postcall_errors. Credential: AP Supabase. A database logging failure still attempts the admin alert.",
+      "notesInFlow": false,
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "Logistics Supabase"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true,
+      "retryOnFail": false
+    },
+    {
+      "id": "alert-ap-admin",
+      "name": "Alert Logistics admin",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        780,
+        0
+      ],
+      "parameters": {
+        "authentication": "accessToken",
+        "resource": "message",
+        "operation": "post",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "<YOUR_SLACK_CHANNEL_ID>"
+        },
+        "messageType": "text",
+        "text": "={{ 'NovaCore Logistics | Internal processing alert | <@<YOUR_SLACK_OWNER_ID>>\\nNode: '+$('Prepare safe error').first().json.failed_node+'\\nReason: '+$('Prepare safe error').first().json.error_message+'\\nExecution: '+($('Prepare safe error').first().json.execution_id||'unavailable') }}",
+        "otherOptions": {
+          "includeLinkToWorkflow": false,
+          "mrkdwn": false,
+          "unfurl_links": false,
+          "unfurl_media": false
+        }
+      },
+      "notes": "Internal metadata-only alert. Select AP Slack, set admin channel ID and invite the bot. Never send raw invoice content in this alert.",
+      "notesInFlow": false,
+      "credentials": {
+        "slackApi": {
+          "id": "",
+          "name": "Logistics Slack"
+        }
+      },
+      "retryOnFail": false
+    }
+  ],
+  "connections": {
+    "Catch Logistics error": {
+      "main": [
+        [
+          {
+            "node": "Prepare safe error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare safe error": {
+      "main": [
+        [
+          {
+            "node": "Log Logistics error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Logistics error": {
+      "main": [
+        [
+          {
+            "node": "Alert Logistics admin",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Africa/Lagos",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "none",
+    "saveManualExecutions": false,
+    "saveExecutionProgress": false
+  }
+}

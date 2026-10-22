@@ -1,0 +1,271 @@
+{
+  "name": "Post-Call - Global Errors",
+  "nodes": [
+    {
+      "id": "catch-workflow-error",
+      "name": "Catch workflow error",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {},
+      "notes": "Receives failed production execution metadata from the main workflow. Set this workflow as the main workflow Error Workflow. Manual Execute Workflow does not trigger it.",
+      "notesInFlow": false
+    },
+    {
+      "id": "read-failed-execution",
+      "name": "Read failed execution",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ '<YOUR_N8N_CLOUD_URL>/api/v1/executions/'+encodeURIComponent($json.execution?.id||'missing') }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "n8nApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "includeData",
+              "value": "true"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "notes": "Read saved failed execution to recover the actual previous-node output supplied to the failed node. Credential: PostCall n8n API. Replace <YOUR_N8N_CLOUD_URL> without trailing slash. Requires n8n API access; unavailable on Cloud free trial. Failure continues with input explicitly unavailable.",
+      "notesInFlow": false,
+      "credentials": {
+        "n8nApi": {
+          "id": "",
+          "name": "PostCall n8n API"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "prepare-safe-error",
+      "name": "Prepare safe error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "function scrub(value,depth=0) {\n  if(depth>15)return '[depth limit]';\n  if(typeof value==='string')return value.replace(/\\b(?:Bearer\\s+)?eyJ[\\w.-]+/g,'[credential removed]').replace(/\\b(?:sk-|xox[baprs]-)[\\w-]+/g,'[credential removed]').replace(/\\b(?:authorization|api[-_ ]?key|token|password|secret)\\s*[:=]\\s*\\S+/gi,'[credential removed]');\n  if(Array.isArray(value))return value.map(v=>scrub(v,depth+1));\n  if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).filter(([k])=>!/^(headers|credentials|authorization|cookie|set-cookie|api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)$/i.test(k)).map(([k,v])=>[k,scrub(v,depth+1)]));\n  return value;\n}\n\nfunction failureRecord(event,response) {\n  const execution=event.execution||{},snapshot=response?.data?.resultData?response:response?.body?.data?.resultData?response.body:response;\n  const result=snapshot?.data?.resultData||snapshot?.resultData;\n  const runData=result?.runData||{};\n  const failed=execution.lastNodeExecuted||execution.error?.node?.name||event.trigger?.error?.node?.name||result?.lastNodeExecuted||'Trigger or unknown node';\n  const runs=runData[failed]||[],last=runs[runs.length-1];\n  let inputs=[],available=false;\n  for(const source of last?.source||[]) {\n    if(!source)continue;\n    const history=runData[source.previousNode]||[];\n    const prior=history[source.previousNodeRun??history.length-1];\n    const items=prior?.data?.main?.[source.previousNodeOutput??0];\n    if(items){inputs.push({from_node:source.previousNode,items:items.map(x=>x.json)});available=true}\n  }\n  const archive=runData['Archive raw transcript']?.[0]?.data?.main?.[0]?.[0]?.json;\n  const message=scrub(String(execution.error?.message||event.trigger?.error?.message||'Execution failed')).replace(/https?:\\/\\/\\S+/g,'[URL removed]').slice(0,2000);\n  return {workflow_name:String(event.workflow?.name||'Post-Call Revenue Intelligence').slice(0,200),\n    failed_node:String(failed).slice(0,200),error_message:message,execution_id:execution.id?String(execution.id):null,\n    failed_input:scrub({available,reason:available?null:'Input unavailable: execution not saved, API unavailable, trigger failure or missing source data',transcript_id:archive?.id||null,inputs})};\n}\n\nreturn [{json:failureRecord($('Catch workflow error').first().json,$json)}];"
+      },
+      "notes": "Extract workflow name, failed node, scrubbed error and actual input when saved source data exists. Remove credential/header fields and recognizable tokens. Input: execution API response plus trigger; output: exact postcall_errors columns. Never substitute the trigger as failed input. No manual values.",
+      "notesInFlow": false
+    },
+    {
+      "id": "log-error-in-supabase",
+      "name": "Log error in Supabase",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        720,
+        0
+      ],
+      "parameters": {
+        "authentication": "secretKey",
+        "resource": "row",
+        "operation": "create",
+        "tableId": "postcall_errors",
+        "dataToSend": "autoMapInputData",
+        "inputsToIgnore": ""
+      },
+      "notes": "Store scrubbed error and JSON failed_input. Input: exact error columns; output: inserted error row or error item. Logging failures continue to admin alert. Credential: PostCall Supabase (Supabase API). Public schema, named table only.",
+      "notesInFlow": false,
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "PostCall Supabase"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "mark-intelligence-failed",
+      "name": "Mark intelligence failed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        960,
+        0
+      ],
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ '<YOUR_SUPABASE_URL>/rest/v1/postcall_intelligence'+('?transcript_id=eq.'+($('Prepare safe error').first().json.failed_input.transcript_id||'00000000-0000-0000-0000-000000000000')+'&status=not.in.(completed,unmatched_completed)') }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "return=representation"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify(({status:'failed'})) }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "notes": "Mark this call reservation failed when its archived transcript ID can be recovered. Completed rows stay complete. Unknown ID performs a no-op. Failure continues to admin alert. Credential: PostCall Supabase. Replace <YOUR_SUPABASE_URL> with project URL, no trailing slash.",
+      "notesInFlow": false,
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "PostCall Supabase"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "alert-slack-admin",
+      "name": "Alert Slack admin",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        1200,
+        0
+      ],
+      "parameters": {
+        "authentication": "accessToken",
+        "resource": "message",
+        "operation": "post",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "<POSTCALL_ADMIN_CHANNEL_ID>"
+        },
+        "messageType": "text",
+        "text": "={{ 'Post-call automation failed.\\nWorkflow: '+$('Prepare safe error').first().json.workflow_name+'\\nNode: '+$('Prepare safe error').first().json.failed_node+'\\nError: '+$('Prepare safe error').first().json.error_message+'\\nExecution: '+($('Prepare safe error').first().json.execution_id||'unavailable')+'\\nFailed input recovered: '+$('Prepare safe error').first().json.failed_input.available+'\\nSupabase error saved: '+Boolean($('Log error in Supabase').first().json.id) }}",
+        "otherOptions": {
+          "includeLinkToWorkflow": false,
+          "mrkdwn": true
+        }
+      },
+      "notes": "Post short admin alert without transcript or failed-input contents. Replace <POSTCALL_ADMIN_CHANNEL_ID>. Input: error logging result and safe metadata; output: Slack response. A failure here must be inspected in Executions. Credential: PostCall Slack; invite the bot to the target internal channel.",
+      "notesInFlow": false,
+      "credentials": {
+        "slackApi": {
+          "id": "",
+          "name": "PostCall Slack"
+        }
+      }
+    },
+    {
+      "id": "error-recovery-requirements",
+      "name": "Error recovery requirements",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -320
+      ],
+      "parameters": {
+        "content": "## Error recovery requirements\nSelect this workflow in the main workflow Settings → Error workflow. Production failures only. Keep error execution data saved. PostCall n8n API reads execution input; Cloud free trial has no public API, so input is honestly marked unavailable. Logging continues if that API or the database fails. Invite Slack bot to the admin channel.",
+        "width": 1100,
+        "height": 240,
+        "color": 5
+      },
+      "notes": "",
+      "notesInFlow": false
+    }
+  ],
+  "connections": {
+    "Catch workflow error": {
+      "main": [
+        [
+          {
+            "node": "Read failed execution",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read failed execution": {
+      "main": [
+        [
+          {
+            "node": "Prepare safe error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare safe error": {
+      "main": [
+        [
+          {
+            "node": "Log error in Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log error in Supabase": {
+      "main": [
+        [
+          {
+            "node": "Mark intelligence failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark intelligence failed": {
+      "main": [
+        [
+          {
+            "node": "Alert Slack admin",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Africa/Lagos",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": false,
+    "saveExecutionProgress": false
+  }
+}

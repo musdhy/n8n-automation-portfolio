@@ -1,0 +1,184 @@
+{
+  "name": "NovaCore V3 - Errors",
+  "nodes": [
+    {
+      "id": "01-catch-lead-failure",
+      "name": "01 Catch lead failure",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "parameters": {},
+      "position": [
+        0,
+        0
+      ],
+      "notes": "Select this workflow as V3 main Error workflow. No API key or helper workflow needed.",
+      "notesInFlow": false
+    },
+    {
+      "id": "02-prepare-safe-failure",
+      "name": "02 Prepare safe failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "function clean(value, max = 500) {\n  return typeof value === 'string' ? value.trim().replace(/[\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f]/g, '').slice(0, max) : '';\n}\n\nfunction sanitizeError(value) {\n  // Keep the reason, but remove typical credential forms, quoted payloads and URLs.\n  return String(value || 'Execution failed; inspect node settings').split('\\n')[0]\n    .replace(/https?:\\/\\/\\S+/gi, '[URL removed]')\n    .replace(/\\b(?:Bearer\\s+)?eyJ[\\w.-]+/g, '[credential removed]')\n    .replace(/\\b(?:sk-|xox[baprs]-)[\\w-]+/g, '[credential removed]')\n    .replace(/\\b(?:authorization|api[-_ ]?key|token|password|secret)\\b\\s*[:=]\\s*\\S+/gi, '[credential removed]')\n    .replace(/\\{.*|\\[.*$/, '[details omitted]')\n    .replace(/\"[^\"]*\"|'[^']*'/g, '[quoted value removed]')\n    .replace(/\\b[A-Za-z0-9_+/=-]{32,}\\b/g, '[long value removed]')\n    .slice(0, 500);\n}\nconst e=$input.first().json,execution=e.execution||{};\nconst reason=sanitizeError(execution.error?.message||e.trigger?.error?.message).replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/gi,'[email omitted]');\nreturn [{json:{execution_id:String(execution.id||''),node:clean(execution.lastNodeExecuted||e.trigger?.error?.node?.name||'Unknown node',160),message:reason,at:new Date().toISOString(),error_channel_id:'<YOUR_SLACK_CHANNEL_ID>'}}];"
+      },
+      "position": [
+        240,
+        0
+      ],
+      "notes": "Reuse V2 error scrubber, plus email masking. Only reason, node, execution ID and timestamp. No lead body, company response, credential, stack or arbitrary URL.",
+      "notesInFlow": false
+    },
+    {
+      "id": "03-record-failure-on-lead",
+      "name": "03 Record failure on lead",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "parameters": {
+        "authentication": "secretKey",
+        "resource": "row",
+        "operation": "update",
+        "tableId": "leads",
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "status",
+              "fieldValue": "failed"
+            },
+            {
+              "fieldId": "error_message",
+              "fieldValue": "={{ $json.message }}"
+            },
+            {
+              "fieldId": "error_node",
+              "fieldValue": "={{ $json.node }}"
+            },
+            {
+              "fieldId": "error_execution_id",
+              "fieldValue": "={{ $json.execution_id }}"
+            },
+            {
+              "fieldId": "updated_at",
+              "fieldValue": "={{ $json.at }}"
+            }
+          ]
+        },
+        "filterType": "manual",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "processing_execution_id",
+              "condition": "eq",
+              "keyValue": "={{ $json.execution_id||'no-execution-id' }}"
+            },
+            {
+              "keyName": "status",
+              "condition": "in",
+              "keyValue": "(new,processing)"
+            }
+          ]
+        }
+      },
+      "position": [
+        480,
+        0
+      ],
+      "notes": "Only rows owned by the failed execution and still new/processing may be marked failed. A missing row or logging failure still continues to the admin alert. No new table, expiry or automatic write retry.",
+      "notesInFlow": false,
+      "retryOnFail": false,
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true,
+      "credentials": {
+        "supabaseApi": {
+          "id": "",
+          "name": "NovaCore Supabase"
+        }
+      }
+    },
+    {
+      "id": "04-alert-lead-errors",
+      "name": "04 Alert lead errors",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "parameters": {
+        "authentication": "accessToken",
+        "resource": "message",
+        "operation": "post",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('02 Prepare safe failure').first().json.error_channel_id }}"
+        },
+        "messageType": "text",
+        "text": "={{ (()=>{const r=$('02 Prepare safe failure').first().json;const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');return 'NovaCore V3 failure | <@<YOUR_SLACK_OWNER_ID>>\\nNode: '+esc(r.node)+'\\nReason: '+esc(r.message)+'\\nExecution: '+esc(r.execution_id);})() }}",
+        "otherOptions": {
+          "includeLinkToWorkflow": false,
+          "mrkdwn": true,
+          "unfurl_links": false,
+          "unfurl_media": false
+        }
+      },
+      "position": [
+        720,
+        0
+      ],
+      "notes": "Safe internal metadata only. Attach NovaCore Slack; <YOUR_SLACK_CHANNEL_ID> must include this bot. Alert failure is visible in n8n; do not automatically retry notifications.",
+      "notesInFlow": false,
+      "retryOnFail": false,
+      "credentials": {
+        "slackApi": {
+          "id": "",
+          "name": "NovaCore Slack"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "01 Catch lead failure": {
+      "main": [
+        [
+          {
+            "node": "02 Prepare safe failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "02 Prepare safe failure": {
+      "main": [
+        [
+          {
+            "node": "03 Record failure on lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "03 Record failure on lead": {
+      "main": [
+        [
+          {
+            "node": "04 Alert lead errors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Africa/Lagos",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false,
+    "saveExecutionProgress": false
+  }
+}
